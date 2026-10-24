@@ -71,7 +71,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     // padding (the focused icon grows 20% without touching its edge). The icons are 16:9, the shape of the apps' TV
     // banners, so those are never stretched: up to 224 × 126, 178 × 100 with eight apps, 133 × 75 with ten
     // (HomeApps.shelfVisible; past that the shelf scrolls).
-    private static final float SHELF_PAD = 40, TILE_GAP = 48;
+    private static final float SHELF_PAD = 40, TILE_GAP = 60;
     private static final float TILE_RADIUS = 22;
     // Tile focus (Apple TV style): it grows from the center and its shadow drops (it "rises" toward the viewer).
     private static final float FOCUS_GROW = 0.2f;
@@ -95,13 +95,18 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     // The tab bar is a 68 px capsule; the cards sit on the 5-column grid (the wide one spans 3).
     private static final float L_TITLE_BASE = 130, L_TABBAR_TOP = 158, L_TABBAR_H = 68, L_CARDS_TOP = 262, L_CARD_H = 442;
     private static final float L_TALL_W = 320, L_CARD_GAP = 40, L_BUTTON = 68, L_BUTTON_GAP = 20, L_BUTTON_CY = 103;
-    private static final float L_PLATTER_TOP = 814, L_TILE_H = 126;
+    // Dock like CleanXiaomiTV: four big 16:9 tiles (352 x 198) in a glass bar that ends at the bottom safe area.
+    private static final float L_PLATTER_TOP = 742, L_TILE_H = 198;
+    // Apps visible on the shelf at once (more scroll); the rest are in All Apps, five to a row.
+    private static final int SHELF_MAX = 4;
     // Clock block at the top left (greeting, big clock, then weather and date in a column beside it) and the quotes
     // row under it.
     private static final float L_GREET_BASE = 96, L_CLOCK_BASE = 206, L_WEATHER_BASE = 160, L_QUOTES_BASE = 286;
     // Clean look (like CleanXiaomiTV): always the dark look with white text and smoked glass, and always the clock
     // layout instead of the For You cards. false and false: the original Free My TV look (day/night, cards).
     private static final boolean ALWAYS_DARK = true, CLEAN_LAYOUT = true;
+    // Today's Bing photo of the day behind the home screen (downloaded once a day, kept on the TV).
+    private static final boolean BING_PHOTO = true;
     private static final int L_INK = 0xFF1D1D1F, L_DIM = 0xFF6E6E73, L_FAINT = 0xFF8E8E93;
     private static String[] tabs;
     private static int tabsGeneration = -1;
@@ -269,6 +274,14 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private final Paint tileFill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF tmp = new RectF(), cell = new RectF(), screen = new RectF();
     private final TextPaint fitPaint = new TextPaint();
+    // Bing photo of the day: cropped to the screen, what the glass and the frosted panels read, and its credit.
+    private Bitmap bing;
+    private int[] bingGlass, bingFrost;
+    private String bingDay = "", bingCredit = "";
+    private boolean bingBusy;
+    private long bingTriedAt;
+    private LinearGradient bingScrimTop, bingScrimBottom;
+    private Paint bingCreditPaint, lShelfName, lPill;
     private final RectF gridCell = new RectF();
     private LinearGradient[] tileShaders = new LinearGradient[0];
     private LinearGradient tileGlow, cardSheen;
@@ -367,7 +380,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         data = HomeData.get(a);
         recs = Recs.get(a);
         click = new Click(a);
-        shelfVisible = HomeApps.shelfVisible(a);
+        shelfVisible = Math.min(SHELF_MAX, HomeApps.shelfVisible(a));
         ui = a.getSharedPreferences("home-ui", Context.MODE_PRIVATE);
         tvInputs = (TvInputManager) a.getSystemService(Context.TV_INPUT_SERVICE);
         launcherApps = (LauncherApps) a.getSystemService(Context.LAUNCHER_APPS_SERVICE);
@@ -540,8 +553,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         measure(status, Math.round(1160 * kk), Math.round(240 * kk));
         // Sized to what they draw (the glass and its shadow; the grown tiles and their shadows): smaller layers are
         // cheaper for the GPU to composite on every frame of the drawer animation.
-        measure(platter, width, Math.round(320 * kk));
-        measure(tiles, width, Math.round(270 * kk));
+        measure(platter, width, Math.round(400 * kk));
+        measure(tiles, width, Math.round(340 * kk));
         measure(drawerLayer, width, Math.round(600 * kk));
         measure(sheetLayer, width, height);
         measure(toastLayer, Math.round(1000 * kk), Math.round(220 * kk));
@@ -558,8 +571,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         sky.layout(0, 0, width, height);
         place(heroLayer, 0, 0);
         place(status, width - status.getMeasuredWidth(), 0);
-        place(platter, 0, Math.round(750 * kk));
-        place(tiles, 0, Math.round(790 * kk));
+        place(platter, 0, Math.round(680 * kk));
+        place(tiles, 0, Math.round(730 * kk));
         place(drawerLayer, 0, Math.round(470 * kk));
         sheetLayer.layout(0, 0, width, height);
         sheetLayer.setPivotX(width / 2f);
@@ -581,6 +594,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         gridLabels = null;
         clockMinute = -1;
         updateClock();
+        loadBing();
         Symbols.warm(getContext(), "bell", 26 * k);
         layoutShelf();
         layoutStatus();
@@ -622,6 +636,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         lWeather = Ui.text(Ui.medium, 32 * k, L_DIM);
         lClockQuote = Ui.numbers(Ui.medium, 28 * k, L_DIM);
         lightGradient = null;
+        bingScrimTop = bingScrimBottom = null;
+        bingCreditPaint = Ui.text(Ui.regular, 18 * k, 0x70FFFFFF);
+        bingCreditPaint.setTextAlign(Paint.Align.RIGHT);
+        lShelfName = Ui.text(Ui.regular, 60 * k, 0xFFFFFFFF);
+        lShelfName.setShadowLayer(18 * k, 0, 2 * k, 0x73000000);
+        lPill = Ui.text(Ui.medium, 26 * k, 0xF2FFFFFF);
         buttonPaint = Ui.text(Ui.semibold, 29 * k, INK);
         capsuleText = Ui.numbers(Ui.medium, 29 * k, 0xF2FFFFFF);
         tipPaint = Ui.text(Ui.semibold, 25 * k, 0xF2FFFFFF);
@@ -769,6 +789,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         clockMinute = minute;
         clockText = Ui.clock(now);
         dateText = Ui.date(now);
+        loadBing();   // a new photo each day (and a retry, now and then, while offline)
         return true;
     }
 
@@ -857,6 +878,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     /** Swaps the background with a cross-fade (from one image to another, from the gradient to an image, or back). */
     private void showBackdrop(Backdrop b) {
+        if (bing != null) return;   // the photo of the day is the background
         if (b == bgTo) return;
         long up = SystemClock.uptimeMillis();
         // In the middle of another swap, start from whichever is more visible.
@@ -888,6 +910,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (!scene.shaded()) {   // Android 8 to 12: a gray image would be one more full-area pass for the flat look
             scene.clearFrost();
             scene.clearGlass();
+            nightPair = false;
+            return;
+        }
+        if (bing != null && bingGlass != null && bingFrost != null) {
+            scene.setFrost(bingFrost);
+            scene.setGlassImage(bingGlass);
             nightPair = false;
             return;
         }
@@ -986,6 +1014,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         lDate.setColor(tone(L_DIM, 0xFF98989D));
         lClock.setColor(tone(L_INK, WHITE));
         lGreet.setColor(tone(L_FAINT, 0xB3FFFFFF));
+        if (bing != null) lGreet.setColor(0xCCFFFFFF);
         lWeather.setColor(tone(L_DIM, 0xFF98989D));
         lClockQuote.setColor(tone(L_DIM, 0xFF98989D));
         staleQuote.setColor(tone(L_FAINT, 0x99FFFFFF));
@@ -1785,7 +1814,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         statusChanged |= topChanged;
         tilesDirty |= snap || tilesChanged;
         statusDirty |= snap || statusChanged;
-        heroDirty |= snap || heroChanged;
+        heroDirty |= snap || heroChanged || tilesChanged;   // the focused app's name is drawn above the shelf
         drawerDirty |= snap || drawerChanged;
         spoken.focusMoved();
     }
@@ -2835,6 +2864,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         boolean fading = bgFadeAt != 0;
         // Drawer open: the background lightens (by day) or darkens (at night), as a filter on the drawing itself.
         android.graphics.ColorFilter v = veil(tone(0.32f, 0.42f) * Ui.clamp(drawer.value), blend(0xFFFFFFFF, 0xFF000000, night));
+        if (bing != null) {
+            drawBing(c, v);
+            return;
+        }
         if (bgTo == null || (fading && bgFrom == null)) {
             if (lightGradient == null) lightGradient = Ui.gradient(h, 0xFFF5F5F7, 0xFFE2E2E7);
             if (nightGradient == null) nightGradient = Ui.gradient(h, 0xFF1C1C1E, 0xFF0B0B0D);
@@ -2859,6 +2892,259 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         imagePaint.setColorFilter(null);
     }
 
+    // MARK: - Bing photo of the day
+
+    /** The photo, darkened a little at the top and the bottom so the clock, the app name and the shelf read well. */
+    private void drawBing(Canvas c, android.graphics.ColorFilter v) {
+        imagePaint.setColorFilter(v);
+        drawImage(c, bing, 1);
+        imagePaint.setColorFilter(null);
+        if (bingScrimTop == null) {
+            bingScrimTop = new LinearGradient(0, 0, 0, h * 0.42f, 0x8C000000, 0x00000000, Shader.TileMode.CLAMP);
+            bingScrimBottom = new LinearGradient(0, h * 0.5f, 0, h, 0x00000000, 0xB8000000, Shader.TileMode.CLAMP);
+        }
+        fill.setColorFilter(v);
+        fill.setColor(0xFF000000);
+        fill.setShader(bingScrimTop);
+        c.drawRect(0, 0, w, h * 0.42f, fill);
+        fill.setShader(bingScrimBottom);
+        c.drawRect(0, h * 0.5f, w, h, fill);
+        fill.setShader(null);
+        fill.setColorFilter(null);
+        if (!bingCredit.isEmpty() && bingCreditPaint != null) {
+            fitPaint.set(bingCreditPaint);
+            String credit = TextUtils.ellipsize(bingCredit, fitPaint, (CONTENT_R - MARGIN) * k, TextUtils.TruncateAt.END).toString();
+            c.drawText(credit, CONTENT_R * k, h - 30 * k, bingCreditPaint);
+        }
+    }
+
+    /** Downloads today's photo (once a day), keeps it in the app's files and prepares what the glass reads. */
+    private void loadBing() {
+        if (!BING_PHOTO || bingBusy || w <= 0 || h <= 0) return;
+        long up = SystemClock.uptimeMillis();
+        String today = new java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US).format(new java.util.Date());
+        if (today.equals(bingDay) || (bingTriedAt != 0 && up - bingTriedAt < 30 * 60_000L)) return;
+        bingBusy = true;
+        bingTriedAt = up;
+        final int tw = Math.min(w, 1920), th = Math.round(h * (tw / (float) w));
+        final java.io.File dir = getContext().getFilesDir();
+        String lang = Ui.language == null ? "" : Ui.language.toLowerCase(java.util.Locale.ROOT);
+        final String market = lang.startsWith("pt") ? "pt-BR" : lang.startsWith("es") ? "es-ES" : "en-US";
+        LOADER.execute(() -> {
+            Bitmap shown = null;
+            int[] glass = null, frost = null;
+            String credit = "", day = "";
+            try {
+                java.io.File img = new java.io.File(dir, "bing-photo.jpg"), meta = new java.io.File(dir, "bing-photo.txt");
+                String saved = meta.exists() ? readText(meta) : "";
+                int nl = saved.indexOf('\n');
+                String savedDay = nl < 0 ? "" : saved.substring(0, nl);
+                credit = nl < 0 ? "" : saved.substring(nl + 1).trim();
+                day = img.exists() ? savedDay : "";
+                if (!today.equals(savedDay) || !img.exists()) {
+                    try {
+                        String json = new String(httpBytes("https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=1&mkt=" + market), "UTF-8");
+                        JSONObject first = new JSONObject(json).getJSONArray("images").getJSONObject(0);
+                        String url = first.getString("url");
+                        if (url.startsWith("/")) url = "https://www.bing.com" + url;
+                        byte[] bytes = httpBytes(url);
+                        if (bytes.length > 50_000) {
+                            java.io.File part = new java.io.File(dir, "bing-photo.part");
+                            writeBytes(part, bytes);
+                            if (!part.renameTo(img)) throw new java.io.IOException("rename");
+                            credit = first.optString("copyright", "");
+                            writeBytes(meta, (today + "\n" + credit).getBytes("UTF-8"));
+                            day = today;
+                        }
+                    } catch (Exception offline) {
+                        // Offline or Bing changed: the last photo, if there is one, stays.
+                    }
+                }
+                if (img.exists()) {
+                    android.graphics.BitmapFactory.Options o = new android.graphics.BitmapFactory.Options();
+                    o.inJustDecodeBounds = true;
+                    android.graphics.BitmapFactory.decodeFile(img.getPath(), o);
+                    int sample = 1;
+                    while (o.outWidth / (sample * 2) >= tw && o.outHeight / (sample * 2) >= th) sample *= 2;
+                    o = new android.graphics.BitmapFactory.Options();
+                    o.inSampleSize = sample;
+                    Bitmap raw = android.graphics.BitmapFactory.decodeFile(img.getPath(), o);
+                    if (raw != null) {
+                        // Cover: the part of the photo with the screen's proportions, scaled to the screen.
+                        float want = tw / (float) th, have = raw.getWidth() / (float) raw.getHeight();
+                        Rect src = have > want
+                                ? new Rect((int) ((raw.getWidth() - raw.getHeight() * want) / 2), 0,
+                                        (int) ((raw.getWidth() + raw.getHeight() * want) / 2), raw.getHeight())
+                                : new Rect(0, (int) ((raw.getHeight() - raw.getWidth() / want) / 2), raw.getWidth(),
+                                        (int) ((raw.getHeight() + raw.getWidth() / want) / 2));
+                        shown = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888);
+                        new Canvas(shown).drawBitmap(raw, src, new Rect(0, 0, tw, th), new Paint(Paint.FILTER_BITMAP_FLAG));
+                        raw.recycle();
+                        glass = photoPixels(shown, Backdrop.GW, Backdrop.GH, 0.42f, 2);
+                        frost = photoPixels(shown, Backdrop.FW, Backdrop.FH, 0.30f, 3);
+                    }
+                }
+            } catch (Exception | OutOfMemoryError e) {
+                shown = null;
+            }
+            final Bitmap fb = shown;
+            final int[] fg = glass, ff = frost;
+            final String fc = credit, fd = day;
+            handler.post(() -> {
+                bingBusy = false;
+                if (fb == null || fg == null || ff == null) return;
+                bing = fb;
+                bingGlass = fg;
+                bingFrost = ff;
+                bingCredit = fc;
+                bingDay = fd;
+                // The photo replaces any background in use: the glass reads it from now on.
+                bgTo = null;
+                bgFrom = null;
+                bgFadeAt = 0;
+                nightPair = false;
+                nightChanged();
+                heroDirty = true;
+                wake();
+            });
+        });
+    }
+
+    /** `photo` reduced to wd x ht, darkened to `keep` of its light and blurred: what the glass sees through. */
+    private static int[] photoPixels(Bitmap photo, int wd, int ht, float keep, int radius) {
+        Bitmap small = Bitmap.createScaledBitmap(photo, wd, ht, true);
+        int[] px = new int[wd * ht];
+        small.getPixels(px, 0, wd, 0, 0, wd, ht);
+        if (small != photo) small.recycle();
+        for (int i = 0; i < px.length; i++) {
+            int p = px[i];
+            px[i] = 0xFF000000 | (Math.round(((p >> 16) & 255) * keep) << 16) | (Math.round(((p >> 8) & 255) * keep) << 8)
+                    | Math.round((p & 255) * keep);
+        }
+        int[] tmpPx = new int[px.length];
+        for (int pass = 0; pass < 2; pass++) {
+            boxBlur(px, tmpPx, wd, ht, radius, true);
+            boxBlur(tmpPx, px, wd, ht, radius, false);
+        }
+        return px;
+    }
+
+    private static void boxBlur(int[] src, int[] dst, int wd, int ht, int r, boolean horizontal) {
+        int n = 2 * r + 1;
+        for (int y = 0; y < ht; y++) {
+            for (int x = 0; x < wd; x++) {
+                int red = 0, green = 0, blue = 0;
+                for (int d = -r; d <= r; d++) {
+                    int xx = horizontal ? Math.max(0, Math.min(wd - 1, x + d)) : x;
+                    int yy = horizontal ? y : Math.max(0, Math.min(ht - 1, y + d));
+                    int p = src[yy * wd + xx];
+                    red += (p >> 16) & 255;
+                    green += (p >> 8) & 255;
+                    blue += p & 255;
+                }
+                dst[y * wd + x] = 0xFF000000 | ((red / n) << 16) | ((green / n) << 8) | (blue / n);
+            }
+        }
+    }
+
+    private static byte[] httpBytes(String address) throws java.io.IOException {
+        java.net.HttpURLConnection conn = (java.net.HttpURLConnection) new java.net.URL(address).openConnection();
+        conn.setConnectTimeout(10_000);
+        conn.setReadTimeout(25_000);
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android) FreeMyTV");
+        try {
+            if (conn.getResponseCode() != 200) throw new java.io.IOException("HTTP " + conn.getResponseCode());
+            java.io.InputStream in = conn.getInputStream();
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[16 * 1024];
+            int len;
+            while ((len = in.read(buf)) > 0) {
+                out.write(buf, 0, len);
+                if (out.size() > 12_000_000) throw new java.io.IOException("too big");
+            }
+            in.close();
+            return out.toByteArray();
+        } finally {
+            conn.disconnect();
+        }
+    }
+
+    private static String readText(java.io.File f) throws java.io.IOException {
+        java.io.FileInputStream in = new java.io.FileInputStream(f);
+        try {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int len;
+            while ((len = in.read(buf)) > 0) out.write(buf, 0, len);
+            return new String(out.toByteArray(), "UTF-8");
+        } finally {
+            in.close();
+        }
+    }
+
+    private static void writeBytes(java.io.File f, byte[] data) throws java.io.IOException {
+        java.io.FileOutputStream out = new java.io.FileOutputStream(f);
+        try {
+            out.write(data);
+        } finally {
+            out.close();
+        }
+    }
+
+    // MARK: - Name of the focused app and the network pill
+
+    /** The focused app's name in large type above the shelf, on the left (the shelf's own glass is under it). */
+    private void drawShelfName(Canvas c) {
+        if (sheetOpen || zone != Z_SHELF || shelfIndex < 0 || shelfIndex >= shelf.size() || platterRect.isEmpty()) return;
+        String label = shelf.get(shelfIndex).label;
+        if (label == null || label.isEmpty()) return;
+        lShelfName.setColor(bing != null ? 0xFFFFFFFF : tone(L_INK, WHITE));
+        fitPaint.set(lShelfName);
+        String fit = TextUtils.ellipsize(label, fitPaint, platterRect.width() - 2 * SHELF_PAD * k, TextUtils.TruncateAt.END).toString();
+        c.drawText(fit, platterRect.left + SHELF_PAD * k - Ui.leftBearing(lShelfName, fit), platterRect.top - 36 * k, lShelfName);
+    }
+
+    /** "Wi-Fi" or "Ethernet" (the network's name needs location permission, which the home screen doesn't ask for). */
+    private String networkLabel() {
+        try {
+            android.net.ConnectivityManager cm = (android.net.ConnectivityManager) getContext().getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return "";
+            android.net.Network net = cm.getActiveNetwork();
+            if (net == null) return "";
+            android.net.NetworkCapabilities caps = cm.getNetworkCapabilities(net);
+            if (caps == null) return "";
+            if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET)) return "Ethernet";
+            if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)) return "Wi-Fi";
+        } catch (RuntimeException e) {
+            // No permission or no network service: no pill.
+        }
+        return "";
+    }
+
+    /** Glass pill left of the round buttons, with a green dot and the connection type. */
+    private void drawNetworkPill(Canvas c) {
+        if (lightButtons.isEmpty() || lPill == null) return;
+        String label = networkLabel();
+        if (label.isEmpty()) return;
+        RectF first = topRects[3];
+        float ph = 60 * k, dot = 12 * k, padX = 28 * k, gap = 14 * k;
+        float pw = padX + dot + gap + lPill.measureText(label) + padX;
+        float right = first.left - 18 * k, cy = first.centerY();
+        cell.set(right - pw, cy - ph / 2, right, cy + ph / 2);
+        float rad = ph / 2;
+        tmp.set(cell);
+        tmp.offset(0, 6 * k);
+        shadow.setColor(Ui.alpha(0xFF000000, tone(0.1f, 0.3f)));
+        shadows.draw(c, tmp, rad, SHADOW_BLUR * k, shadow);
+        scene.liquid(c, cell, rad, tone(0xFFFFFFFF, SMOKE), tone(0.55f, 0.5f), tone(0.02f, 0.01f), 12 * k, 8 * k,
+                tone(0.6f, 0.45f), 1);
+        fill.setShader(null);
+        fill.setColor(UP_COLOR);
+        c.drawCircle(cell.left + padX + dot / 2, cell.centerY(), dot / 2, fill);
+        lPill.setColor(tone(L_INK, 0xF2FFFFFF));
+        c.drawText(label, cell.left + padX + dot + gap, cell.centerY() + Ui.halfCap(lPill), lPill);
+    }
+
     private void drawLightImage(Canvas c, Backdrop b, float alpha) {
         if (night < 0.999f || b.nightImage == null) drawImage(c, b.lightImage, alpha);
         if (night > 0.001f) drawImage(c, b.nightImage, alpha * night);
@@ -2868,7 +3154,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         applyTone();
         if (!picksOn()) {
             drawClock(c);
-            if (HomeData.coinCount() > 0) drawQuotes(c);
+            drawShelfName(c);
             return;
         }
         String hello = Ui.tr("For You");
@@ -2944,7 +3230,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             weatherLineAt = data.weatherAt;
             weatherLinePrefs = Prefs.version;
             weatherLineLanguage = Ui.language;
-            weatherLine = HomeData.degrees(wx.temp) + "  \u00b7  " + HomeData.condition(wx.code, wx.isDay);
+            String place = Prefs.city();
+            weatherLine = HomeData.degrees(wx.temp) + "  \u00b7  "
+                    + (place == null || place.isEmpty() ? HomeData.condition(wx.code, wx.isDay) : place);
         }
         float size = 38 * k, base = L_WEATHER_BASE * k;
         String symbol = Symbols.weather(wx.code, wx.isDay);
@@ -3026,6 +3314,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
      */
     private void drawLightButtons(Canvas c) {
         applyTone();
+        drawNetworkPill(c);
         for (int i = 0; i < lightButtons.size(); i++) {
             HomeApps.Item it = lightButtons.get(i);
             RectF r = topRects[3 + i];
