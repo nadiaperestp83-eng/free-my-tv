@@ -96,7 +96,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static final float L_TITLE_BASE = 130, L_TABBAR_TOP = 158, L_TABBAR_H = 68, L_CARDS_TOP = 262, L_CARD_H = 442;
     private static final float L_TALL_W = 320, L_CARD_GAP = 40, L_BUTTON = 68, L_BUTTON_GAP = 20, L_BUTTON_CY = 103;
     private static final float L_PLATTER_TOP = 814, L_TILE_H = 126;
-    private static final float L_DATE_BASE = 330, L_CLOCK_BASE = 540, L_WEATHER_BASE = 626, L_QUOTES_BASE = 694;
+    // Clock block at the top left (greeting, big clock, then weather and date in a column beside it) and the quotes
+    // row under it.
+    private static final float L_GREET_BASE = 96, L_CLOCK_BASE = 206, L_WEATHER_BASE = 160, L_QUOTES_BASE = 286;
+    // Clean look (like CleanXiaomiTV): always the dark look with white text and smoked glass, and always the clock
+    // layout instead of the For You cards. false and false: the original Free My TV look (day/night, cards).
+    private static final boolean ALWAYS_DARK = true, CLEAN_LAYOUT = true;
     private static final int L_INK = 0xFF1D1D1F, L_DIM = 0xFF6E6E73, L_FAINT = 0xFF8E8E93;
     private static String[] tabs;
     private static int tabsGeneration = -1;
@@ -146,7 +151,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private final Spring[] cardFocus = new Spring[3];
     private final RectF[] cardRects = new RectF[3];
     private final List<HomeApps.Item> lightButtons = new ArrayList<>();
-    private Paint lTitle, lTab, lTabOn, lCardTitle, lCardMeta, lQuote, lTip, lDate, lClock, lWeather, lClockQuote;
+    private Paint lTitle, lTab, lTabOn, lCardTitle, lCardMeta, lQuote, lTip, lDate, lClock, lWeather, lClockQuote, lGreet;
     private Shader lightGradient;
 
     // Shelf
@@ -608,10 +613,13 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         lQuote = Ui.numbers(Ui.regular, 21 * k, L_FAINT);
         lTip = Ui.text(Ui.semibold, 25 * k, L_INK);
         lTip.setTextAlign(Paint.Align.CENTER);
-        lDate = Ui.text(Ui.semibold, 34 * k, L_DIM);
-        lClock = Ui.numbers(Ui.light, 200 * k, L_INK);
+        lDate = Ui.text(Ui.medium, 24 * k, L_DIM);
+        lDate.setLetterSpacing(0.14f);
+        lGreet = Ui.text(Ui.medium, 22 * k, L_FAINT);
+        lGreet.setLetterSpacing(0.22f);
+        lClock = Ui.numbers(Ui.light, 112 * k, L_INK);
         lClock.setLetterSpacing(-0.01f);
-        lWeather = Ui.text(Ui.medium, 34 * k, L_DIM);
+        lWeather = Ui.text(Ui.medium, 32 * k, L_DIM);
         lClockQuote = Ui.numbers(Ui.medium, 28 * k, L_DIM);
         lightGradient = null;
         buttonPaint = Ui.text(Ui.semibold, 29 * k, INK);
@@ -904,7 +912,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     /** Day or night right now (from the sun at your location); `animate`: with the transition. */
     private void checkNight(boolean animate) {
-        boolean want = data.isNight(System.currentTimeMillis());
+        boolean want = ALWAYS_DARK || data.isNight(System.currentTimeMillis());
         if (want == nightTarget) return;
         nightTarget = want;
         if (animate && running) {
@@ -977,6 +985,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         lTip.setColor(tone(L_INK, WHITE));
         lDate.setColor(tone(L_DIM, 0xFF98989D));
         lClock.setColor(tone(L_INK, WHITE));
+        lGreet.setColor(tone(L_FAINT, 0xB3FFFFFF));
         lWeather.setColor(tone(L_DIM, 0xFF98989D));
         lClockQuote.setColor(tone(L_DIM, 0xFF98989D));
         staleQuote.setColor(tone(L_FAINT, 0x99FFFFFF));
@@ -2896,27 +2905,52 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     private boolean picksOn() {
-        return Recs.hasKey(getContext());
+        return !CLEAN_LAYOUT && Recs.hasKey(getContext());
     }
 
+    /** Greeting for the hour, in the language of the home screen (Portuguese, Spanish or English). */
+    private String greeting() {
+        String lang = Ui.language == null ? "" : Ui.language.toLowerCase(java.util.Locale.ROOT);
+        if (!lang.startsWith("pt") && !lang.startsWith("es") && !lang.startsWith("en")) {
+            lang = java.util.Locale.getDefault().getLanguage();
+        }
+        int hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY);
+        int part = hour < 5 ? 2 : hour < 12 ? 0 : hour < 18 ? 1 : 2;
+        if (lang.startsWith("pt")) return part == 0 ? "BOM DIA" : part == 1 ? "BOA TARDE" : "BOA NOITE";
+        if (lang.startsWith("es")) return part == 0 ? "BUENOS D\u00cdAS" : part == 1 ? "BUENAS TARDES" : "BUENAS NOCHES";
+        return part == 0 ? "GOOD MORNING" : part == 1 ? "GOOD AFTERNOON" : "GOOD EVENING";
+    }
+
+    /**
+     * Top left: the greeting, the clock, and beside it (after a thin divider) the weather and the date in a column,
+     * the date on the clock's baseline.
+     */
     private void drawClock(Canvas c) {
         float x = MARGIN * k;
-        c.drawText(dateText, x - Ui.leftBearing(lDate, dateText), L_DATE_BASE * k, lDate);
+        String hello = greeting();
+        c.drawText(hello, x - Ui.leftBearing(lGreet, hello), L_GREET_BASE * k, lGreet);
         c.drawText(clockText, x - Ui.leftBearing(lClock, clockText), L_CLOCK_BASE * k, lClock);
+        float clockBase = L_CLOCK_BASE * k, cap = Ui.cap(lClock);
+        float divider = x + lClock.measureText(clockText) + 30 * k, colX = divider + 34 * k;
+        cell.set(divider, clockBase - cap * 0.92f, divider + 2 * k, clockBase);
+        fill.setShader(null);
+        fill.setColor(tone(0x26000000, 0x33FFFFFF));
+        c.drawRect(cell, fill);
+        String date = dateText.toUpperCase(java.util.Locale.getDefault());
+        c.drawText(date, colX - Ui.leftBearing(lDate, date), clockBase, lDate);
         HomeData.Weather wx = data.weather;
         if (!Prefs.weather() || Double.isNaN(wx.temp)) return;
         if (data.weatherAt != weatherLineAt || Prefs.version != weatherLinePrefs || !Ui.language.equals(weatherLineLanguage)) {
             weatherLineAt = data.weatherAt;
             weatherLinePrefs = Prefs.version;
             weatherLineLanguage = Ui.language;
-            weatherLine = HomeData.degrees(wx.temp) + "  " + HomeData.condition(wx.code, wx.isDay) + "   "
-                    + HomeData.highLow(wx, "  ");
+            weatherLine = HomeData.degrees(wx.temp) + "  \u00b7  " + HomeData.condition(wx.code, wx.isDay);
         }
-        float size = 40 * k, base = L_WEATHER_BASE * k;
+        float size = 38 * k, base = L_WEATHER_BASE * k;
         String symbol = Symbols.weather(wx.code, wx.isDay);
         float sw = Symbols.width(getContext(), symbol, size);
-        Symbols.draw(getContext(), c, symbol, x + sw / 2, base - Ui.halfCap(lWeather), size, lWeather.getColor());
-        c.drawText(weatherLine, x + sw + 16 * k, base, lWeather);
+        Symbols.draw(getContext(), c, symbol, colX + sw / 2, base - Ui.halfCap(lWeather), size, lWeather.getColor());
+        c.drawText(weatherLine, colX + sw + 14 * k, base, lWeather);
     }
 
     /**
