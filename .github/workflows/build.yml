@@ -10,9 +10,12 @@ jobs:
           distribution: temurin
           java-version: 17
       - name: Build
+        env:
+          TMDB_KEY: ${{ secrets.TMDB_KEY }}
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "build-tools;34.0.0" "platforms;android-34"
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses >/dev/null || true
+          "$SDKM" "build-tools;34.0.0" "platforms;android-34"
           ./build.sh || true
           touch config.properties
           setkey() { sed -i "/^$1=/d" config.properties; echo "$1=$2" >> config.properties; }
@@ -20,8 +23,10 @@ jobs:
           setkey latitude -21.3686
           setkey longitude -45.5128
           setkey tmdb_region BR
+          if [ -n "$TMDB_KEY" ]; then setkey tmdb_key "$TMDB_KEY"; fi
           ./build.sh
       - uses: actions/upload-artifact@v4
         with:
           name: FreeMyTV
           path: FreeMyTV.apk
+          retention-days: 1
