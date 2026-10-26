@@ -74,7 +74,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static final float SHELF_PAD = 40, TILE_GAP = 60;
     private static final float TILE_RADIUS = 22;
     // Tile focus (Apple TV style): it grows from the center and its shadow drops (it "rises" toward the viewer).
-    private static final float FOCUS_GROW = 0.2f;
+    private static final float FOCUS_GROW = 0.05f;   // CleanXiaomiTV: the dock's tiles barely grow
     // Corner capsule.
     // Corner capsule: the height and top offset of the tvOS tab bar (68 and 46).
     private static final float CAPSULE_TOP = 46, CAPSULE_H = 68, BUTTON = 56;
@@ -82,7 +82,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static final float SHIFT = 560, ROW_TITLE = 518, ROW_TOP = 540, ROW_H = 126, CARDS_TOP = 708, CARDS_H = 300;
     // "All Apps" sheet.
     private static final int COLUMNS = 5, VISIBLE_ROWS = 3;
-    private static final float GRID_W = 300, GRID_H = 169, GRID_GAP = 40, GRID_ROW = 239, GRID_TOP = 196, GRID_RADIUS = 22;
+    // All Apps like CleanXiaomiTV: five 286 x 160 tiles to a row under the header, three rows in view.
+    private static final float GRID_W = 286, GRID_H = 160, GRID_GAP = 53, GRID_ROW = 250, GRID_TOP = 266, GRID_RADIUS = 26;
     private static final int SMOKE = 0xFF111113, INK = 0xFF1C1C1E, WHITE = 0xFFF5F5F7;
     private static final int UP_COLOR = 0xFF30D158, DOWN_COLOR = 0xFFFF453A;
     private static final long TOAST_MS = 6000, FADE_MS = 800;
@@ -107,6 +108,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static final boolean ALWAYS_DARK = true, CLEAN_LAYOUT = true;
     // Today's Bing photo of the day behind the home screen (downloaded once a day, kept on the TV).
     private static final boolean BING_PHOTO = true;
+    // Arrows at the glass's edges when the shelf has more apps than it shows (CleanXiaomiTV has none).
+    private static final boolean SHELF_ARROWS = false;
     private static final int L_INK = 0xFF1D1D1F, L_DIM = 0xFF6E6E73, L_FAINT = 0xFF8E8E93;
     private static String[] tabs;
     private static int tabsGeneration = -1;
@@ -282,6 +285,13 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private long bingTriedAt;
     private LinearGradient bingScrimTop, bingScrimBottom;
     private Paint bingCreditPaint, lShelfName, lPill;
+    // Flat glass: the photo reduced, darkened and blurred, drawn through a rounded shape, plus a tint and a thin edge.
+    private Bitmap bingSoft;
+    private BitmapShader softShader;
+    private final Paint softFill = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+    private final Paint softStroke = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final RectF softRect = new RectF();
+    private boolean flatPlain;   // All Apps: the same glass without the photo (the sheet is black)
     private final RectF gridCell = new RectF();
     private LinearGradient[] tileShaders = new LinearGradient[0];
     private LinearGradient tileGlow, cardSheen;
@@ -1236,6 +1246,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private void drawPlatter(Canvas c) {
         if (shelf.isEmpty()) return;
         float radius = (TILE_RADIUS + SHELF_PAD) * k;
+        if (bingSoft != null) {
+            flatGlass(c, platterRect, radius, 0);
+            return;
+        }
         tmp.set(platterRect);
         tmp.offset(0, 18 * k);
         shadow.setColor(tone(0x1F000000, 0x52000000));
@@ -1367,8 +1381,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         // even focused (inside the screen's safe area).
         float cy = platterRect.centerY(), size = 28 * k, inset = 14 * k;
         int ink = tone(0x99000000, 0xCCFFFFFF);
-        if (last < shelf.size()) Symbols.draw(getContext(), c, "chevron_right", platterRect.right - inset, cy, size, ink);
-        if (shelfFirst > 0) {
+        if (SHELF_ARROWS && last < shelf.size()) Symbols.draw(getContext(), c, "chevron_right", platterRect.right - inset, cy, size, ink);
+        if (SHELF_ARROWS && shelfFirst > 0) {
             c.save();
             c.scale(-1, 1, platterRect.left + inset, cy);
             Symbols.draw(getContext(), c, "chevron_right", platterRect.left + inset, cy, size, ink);
@@ -1399,7 +1413,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         tmp.set(-bw / 2, -bh / 2, bw / 2, bh / 2);
         tmp.offset(0, (4 + 14 * f + 6 * l) * k);
         shadowDeep.setColor(Ui.alpha(0xFF000000, tone(0.14f, 0.3f) + tone(0.18f, 0.3f) * fc + 0.14f * Ui.clamp(l)));
-        shadows.draw(c, tmp, r0, DEEP_BLUR * k, shadowDeep);
+        if (bing == null) shadows.draw(c, tmp, r0, DEEP_BLUR * k, shadowDeep);   // flat tiles on the photo
         c.restore();
         int[] style = TILE_STYLE.get(it.key);
         if (it.logo != null && style != null) {
@@ -1880,9 +1894,19 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     private void drawSheet(Canvas c) {
-        c.drawColor(0xA8000000);
+        if (CLEAN_LAYOUT) {
+            // Black, with the header (greeting, clock, Wi-Fi and buttons) kept on top like CleanXiaomiTV.
+            c.drawColor(0xFF000000);
+            applyTone();
+            flatPlain = true;
+            drawClock(c);
+            drawLightButtons(c);
+            flatPlain = false;
+        } else {
+            c.drawColor(0xA8000000);
+        }
         float shift = scroll.value * GRID_ROW * k;
-        c.drawText(Ui.tr("All Apps"), w / 2f, 124 * k - shift, sheetTitle);
+        if (!CLEAN_LAYOUT) c.drawText(Ui.tr("All Apps"), w / 2f, 124 * k - shift, sheetTitle);
         int n = others.size();
         if (gridLabels == null || gridLabels.length != n) {
             gridLabels = new String[n];
@@ -1893,6 +1917,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         float gridWidth = COLUMNS * GRID_W + (COLUMNS - 1) * GRID_GAP;
         float left = (1920 - gridWidth) / 2 * k;
         float gridTop = GRID_TOP * k;
+        c.save();
+        c.clipRect(0, 233 * k, w, h);   // the rows scroll under the header
         for (int i = 0; i < n; i++) {
             int r = i / COLUMNS, col = i % COLUMNS;
             float y = gridTop + r * GRID_ROW * k - shift;
@@ -1902,9 +1928,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             float f = gridFocus[i].value;
             drawCard(c, others.get(i), gridCell, GRID_RADIUS * k, f, 0.08f);
             if (sheetOpen && i == gridIndex) focusedCell.set(cell);
-            gridLabel.setColor(blend(0x99FFFFFF, 0xFFFFFFFF, Ui.clamp(f)));
+            gridLabel.setColor(CLEAN_LAYOUT ? Ui.alpha(0xFFFFFFFF, Ui.clamp(f)) : blend(0x99FFFFFF, 0xFFFFFFFF, Ui.clamp(f)));
             c.drawText(gridLabels[i], gridCell.centerX(), gridCell.bottom + (40 + 6 * f) * k, gridLabel);
         }
+        c.restore();
     }
 
     /** 16:9 sheet card. Focused (the shelf's subtle focus): it grows, with a shadow, a soft sheen and a thin border. */
@@ -2894,6 +2921,42 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     // MARK: - Bing photo of the day
 
+    /**
+     * Flat glass like CleanXiaomiTV's dock and pills: the photo of the day, reduced, darkened and blurred, seen through
+     * the shape; a dark green-black tint over it and a thin light edge. `lift` (0 to 1) brightens it for focus.
+     * Without the photo (flatPlain: the black All Apps sheet) it is plain dark gray with the same edge.
+     */
+    private void flatGlass(Canvas c, RectF r, float radius, float lift) {
+        if (bingSoft != null && !flatPlain) {
+            if (softShader == null) {
+                softShader = new BitmapShader(bingSoft, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
+                android.graphics.Matrix m = new android.graphics.Matrix();
+                m.setScale(w / (float) bingSoft.getWidth(), h / (float) bingSoft.getHeight());
+                softShader.setLocalMatrix(m);
+            }
+            softFill.setShader(softShader);
+            softFill.setColor(0xFFFFFFFF);
+            c.drawRoundRect(r, radius, radius, softFill);
+            softFill.setShader(null);
+            softFill.setColor(0x520A140E);
+            c.drawRoundRect(r, radius, radius, softFill);
+        } else {
+            softFill.setShader(null);
+            softFill.setColor(0xFF161618);
+            c.drawRoundRect(r, radius, radius, softFill);
+        }
+        if (lift > 0.01f) {
+            softFill.setColor(Ui.alpha(0xFFFFFFFF, 0.22f * lift));
+            c.drawRoundRect(r, radius, radius, softFill);
+        }
+        float edge = 1.5f * k;
+        softStroke.setStyle(Paint.Style.STROKE);
+        softStroke.setStrokeWidth(edge);
+        softStroke.setColor(0x38FFFFFF);
+        softRect.set(r.left + edge / 2, r.top + edge / 2, r.right - edge / 2, r.bottom - edge / 2);
+        c.drawRoundRect(softRect, radius - edge / 2, radius - edge / 2, softStroke);
+    }
+
     /** The photo, darkened a little at the top and the bottom so the clock, the app name and the shelf read well. */
     private void drawBing(Canvas c, android.graphics.ColorFilter v) {
         imagePaint.setColorFilter(v);
@@ -2933,6 +2996,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         LOADER.execute(() -> {
             Bitmap shown = null;
             int[] glass = null, frost = null;
+            Bitmap soft = null;
             String credit = "", day = "";
             try {
                 java.io.File img = new java.io.File(dir, "bing-photo.jpg"), meta = new java.io.File(dir, "bing-photo.txt");
@@ -2982,6 +3046,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                         raw.recycle();
                         glass = photoPixels(shown, Backdrop.GW, Backdrop.GH, 0.42f, 2);
                         frost = photoPixels(shown, Backdrop.FW, Backdrop.FH, 0.30f, 3);
+                        soft = Bitmap.createBitmap(photoPixels(shown, 192, 108, 0.62f, 2), 192, 108, Bitmap.Config.ARGB_8888);
                     }
                 }
             } catch (Exception | OutOfMemoryError e) {
@@ -2989,6 +3054,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             }
             final Bitmap fb = shown;
             final int[] fg = glass, ff = frost;
+            final Bitmap fs = soft;
             final String fc = credit, fd = day;
             handler.post(() -> {
                 bingBusy = false;
@@ -2996,6 +3062,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 bing = fb;
                 bingGlass = fg;
                 bingFrost = ff;
+                bingSoft = fs;
+                softShader = null;
                 bingCredit = fc;
                 bingDay = fd;
                 // The photo replaces any background in use: the glass reads it from now on.
@@ -3132,12 +3200,16 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         float right = first.left - 18 * k, cy = first.centerY();
         cell.set(right - pw, cy - ph / 2, right, cy + ph / 2);
         float rad = ph / 2;
+        if (bingSoft != null) {
+            flatGlass(c, cell, rad, 0);
+        } else {
         tmp.set(cell);
         tmp.offset(0, 6 * k);
         shadow.setColor(Ui.alpha(0xFF000000, tone(0.1f, 0.3f)));
         shadows.draw(c, tmp, rad, SHADOW_BLUR * k, shadow);
         scene.liquid(c, cell, rad, tone(0xFFFFFFFF, SMOKE), tone(0.55f, 0.5f), tone(0.02f, 0.01f), 12 * k, 8 * k,
                 tone(0.6f, 0.45f), 1);
+        }
         fill.setShader(null);
         fill.setColor(UP_COLOR);
         c.drawCircle(cell.left + padX + dot / 2, cell.centerY(), dot / 2, fill);
@@ -3320,12 +3392,16 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             RectF r = topRects[3 + i];
             float f = Ui.clamp(topFocus[3 + i].value), s = 1 + 0.1f * f, rad = r.width() / 2 * s;
             cell.set(r.centerX() - rad, r.centerY() - rad, r.centerX() + rad, r.centerY() + rad);
+            if (bingSoft != null) {
+                flatGlass(c, cell, rad, 0);
+            } else {
             tmp.set(cell);
             tmp.offset(0, (6 + 8 * f) * k);
             shadow.setColor(Ui.alpha(0xFF000000, tone(0.1f, 0.3f) + tone(0.14f, 0.2f) * f));
             shadows.draw(c, tmp, rad, SHADOW_BLUR * k, shadow);
             scene.liquid(c, cell, rad, tone(0xFFFFFFFF, SMOKE), tone(0.55f, 0.5f), tone(0.02f, 0.01f), 12 * k, 8 * k,
                     tone(0.6f, 0.45f), 1 - f);
+            }
             if (f > 0.01f) {
                 fill.setShader(null);
                 fill.setColor(Ui.alpha(0xFFFFFFFF, f));
@@ -3346,6 +3422,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private boolean moveLight(int dx, int dy) {
         switch (zone) {
             case Z_SHELF:
+                // Down from the dock opens All Apps (five to a row, on black), like CleanXiaomiTV.
+                if (dy > 0 && CLEAN_LAYOUT && !sheetOpen && !shelf.isEmpty()) {
+                    openSheet();
+                    return true;
+                }
                 // Up from an empty shelf too: move()'s older zones (the hero, the corner capsule) aren't drawn any more.
                 if (dy >= 0) return false;
                 if (cards.isEmpty()) {
