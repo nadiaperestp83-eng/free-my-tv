@@ -652,6 +652,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         lShelfName = Ui.text(Ui.regular, 60 * k, 0xFFFFFFFF);
         lShelfName.setShadowLayer(18 * k, 0, 2 * k, 0x73000000);
         lPill = Ui.text(Ui.medium, 26 * k, 0xF2FFFFFF);
+        for (Paint t : new Paint[] {lClock, lGreet, lDate, lWeather}) t.setShadowLayer(14 * k, 0, 2 * k, 0xB0000000);
         buttonPaint = Ui.text(Ui.semibold, 29 * k, INK);
         capsuleText = Ui.numbers(Ui.medium, 29 * k, 0xF2FFFFFF);
         tipPaint = Ui.text(Ui.semibold, 25 * k, 0xF2FFFFFF);
@@ -2963,15 +2964,18 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         drawImage(c, bing, 1);
         imagePaint.setColorFilter(null);
         if (bingScrimTop == null) {
-            bingScrimTop = new LinearGradient(0, 0, 0, h * 0.42f, 0x8C000000, 0x00000000, Shader.TileMode.CLAMP);
-            bingScrimBottom = new LinearGradient(0, h * 0.5f, 0, h, 0x00000000, 0xB8000000, Shader.TileMode.CLAMP);
+            bingScrimTop = new LinearGradient(0, 0, 0, h * 0.58f, 0xC8000000, 0x00000000, Shader.TileMode.CLAMP);
+            bingScrimBottom = new LinearGradient(0, h * 0.45f, 0, h, 0x00000000, 0xD0000000, Shader.TileMode.CLAMP);
         }
         fill.setColorFilter(v);
+        fill.setShader(null);
+        fill.setColor(0x40000000);   // a general dim: bright, busy photos still leave the text readable
+        c.drawRect(0, 0, w, h, fill);
         fill.setColor(0xFF000000);
         fill.setShader(bingScrimTop);
-        c.drawRect(0, 0, w, h * 0.42f, fill);
+        c.drawRect(0, 0, w, h * 0.58f, fill);
         fill.setShader(bingScrimBottom);
-        c.drawRect(0, h * 0.5f, w, h, fill);
+        c.drawRect(0, h * 0.45f, w, h, fill);
         fill.setShader(null);
         fill.setColorFilter(null);
         if (!bingCredit.isEmpty() && bingCreditPaint != null) {
