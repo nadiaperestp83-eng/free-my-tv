@@ -81,9 +81,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     // Bottom drawer (measured with it open; everything moves up by SHIFT).
     private static final float SHIFT = 560, ROW_TITLE = 518, ROW_TOP = 540, ROW_H = 126, CARDS_TOP = 708, CARDS_H = 300;
     // "All Apps" sheet.
-    private static final int COLUMNS = 5, VISIBLE_ROWS = 3;
+    // Home screen as a grid of apps (4 to a row, no dock): the "All Apps" sheet is always open and is the home.
+    private static final boolean GRID_HOME = true;
+    private static final int COLUMNS = GRID_HOME ? 4 : 5, VISIBLE_ROWS = GRID_HOME ? 2 : 3;
     // All Apps like CleanXiaomiTV: five 286 x 160 tiles to a row under the header, three rows in view.
-    private static final float GRID_W = 286, GRID_H = 160, GRID_GAP = 53, GRID_ROW = 250, GRID_TOP = 266, GRID_RADIUS = 26;
+    private static final float GRID_W = GRID_HOME ? 394 : 286, GRID_H = GRID_HOME ? 222 : 160, GRID_GAP = GRID_HOME ? 40 : 53,
+            GRID_ROW = GRID_HOME ? 316 : 250, GRID_TOP = GRID_HOME ? 233 : 266, GRID_RADIUS = GRID_HOME ? 28 : 26;
     private static final int SMOKE = 0xFF111113, INK = 0xFF1C1C1E, WHITE = 0xFFF5F5F7;
     private static final int UP_COLOR = 0xFF30D158, DOWN_COLOR = 0xFFFF453A;
     private static final long TOAST_MS = 6000, FADE_MS = 800;
@@ -234,8 +237,13 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private final Spring sheet = new Spring(0.38f, 0.9f, 0);
     private final Spring scroll = new Spring(0.34f, 1f, 0);
     private final RectF focusedCell = new RectF();
-    private boolean sheetOpen, shelfEdited;
+    private boolean sheetOpen = GRID_HOME, shelfEdited;
     private int gridIndex;
+    // Moving apps in the grid: hold OK, arrows move the app (it swaps places), OK drops it and saves the order.
+    private boolean gridCarry;
+    private List<HomeApps.Item> gridCarryOrigin;
+    private int gridCarryFrom;
+    private long settingsKeyAt;
     private long toggledAt;
 
     // Toasts
@@ -409,12 +417,17 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         // frame cost more than drawing straight to the screen (measured: focus on the picks 33 → 12 ms a frame, the
         // drawer 19 → 17 ms).
         for (View v : new View[] {heroLayer, status, platter, tiles, drawerLayer, sheetLayer}) v.setLayerType(Ui.LEGACY ? LAYER_TYPE_NONE : LAYER_TYPE_HARDWARE, null);
-        for (View v : new View[] {sky, heroLayer, status, platter, tiles, drawerLayer, sheetLayer, toastLayer}) {
+        for (View v : GRID_HOME ? new View[] {sky, heroLayer, status, platter, tiles, sheetLayer, drawerLayer, toastLayer}
+                : new View[] {sky, heroLayer, status, platter, tiles, drawerLayer, sheetLayer, toastLayer}) {
             v.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);   // TalkBack reads the items (Spoken)
             addView(v);
         }
         setContentDescription("Free My TV");
         drawerLayer.setVisibility(INVISIBLE);
+        if (GRID_HOME) {
+            sheet.snap(1);
+            sheet.target = 1;
+        }
         for (int i = 0; i < topFocus.length; i++) {
             topFocus[i] = new Spring(0.26f, 0.85f, 0);
             topRects[i] = new RectF();
@@ -459,7 +472,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (!again) reload();
         updatePalette();
         updatePicks();
-        if (sheetOpen) closeSheet();
+        if (sheetOpen && !GRID_HOME) closeSheet();
         sheet.snap(sheet.target);
         motionDirty = true;
         invalidateAll();
@@ -494,13 +507,17 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         cancelReorder(!animated);
         zone = Z_SHELF;
         shelfIndex = 0;
-        sheetOpen = false;
+        sheetOpen = GRID_HOME;
         drawerOpen = false;
+        if (GRID_HOME) {
+            gridIndex = 0;
+            cancelGridCarry(true);
+        }
         if (animated) {
-            sheet.target = 0;
+            sheet.target = GRID_HOME ? 1 : 0;
             drawer.target = 0;
         } else {
-            sheet.snap(0);
+            sheet.snap(GRID_HOME ? 1 : 0);
             drawer.snap(0);
         }
         if (pickIndex != 0 && !picks.isEmpty()) {
@@ -509,6 +526,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
         if (tab != 0) selectTab(0);
         retarget(!animated);
+        if (GRID_HOME) {
+            retargetGrid(!animated);
+            gridDirty = true;
+        }
         motionDirty = true;
     }
 
@@ -728,7 +749,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (statusMoving || statusDirty || bgFading) status.invalidate();
         if (heroMoving || heroDirty || heroFading) heroLayer.invalidate();
         if (drawerItemsMoving || drawerDirty || bgFading) drawerLayer.invalidate();
-        if (gridMoving || gridDirty) sheetLayer.invalidate();
+        if (gridMoving || gridDirty || (GRID_HOME && topMoving)) sheetLayer.invalidate();
         if (drawerMoving || bgFading) sky.invalidate();
         if (bgFading || (drawerWasMoving && !drawerMoving)) platter.invalidate();
         drawerWasMoving = drawerMoving;
@@ -801,6 +822,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         clockText = Ui.clock(now);
         dateText = Ui.date(now);
         loadBing();   // a new photo each day (and a retry, now and then, while offline)
+        gridDirty = true;
         return true;
     }
 
@@ -1247,7 +1269,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private void drawPlatter(Canvas c) {
         if (shelf.isEmpty()) return;
         float radius = (TILE_RADIUS + SHELF_PAD) * k;
-        if (bingSoft != null) {
+        if (CLEAN_LAYOUT) {
             flatGlass(c, platterRect, radius, 0);
             return;
         }
@@ -1414,7 +1436,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         tmp.set(-bw / 2, -bh / 2, bw / 2, bh / 2);
         tmp.offset(0, (4 + 14 * f + 6 * l) * k);
         shadowDeep.setColor(Ui.alpha(0xFF000000, tone(0.14f, 0.3f) + tone(0.18f, 0.3f) * fc + 0.14f * Ui.clamp(l)));
-        if (bing == null) shadows.draw(c, tmp, r0, DEEP_BLUR * k, shadowDeep);   // flat tiles on the photo
+        if (!CLEAN_LAYOUT) shadows.draw(c, tmp, r0, DEEP_BLUR * k, shadowDeep);   // flat tiles
         c.restore();
         int[] style = TILE_STYLE.get(it.key);
         if (it.logo != null && style != null) {
@@ -1820,11 +1842,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         // Only the group whose focus changed is redrawn (moving along the shelf doesn't redraw the hero or capsule).
         boolean tilesChanged = aim(tileFocus, !sheetOpen && zone == Z_SHELF ? shelfIndex : -1, snap);
         boolean statusChanged = aim(statusFocus, !sheetOpen && zone == Z_STATUS ? statusIndex : -1, snap);
-        boolean drawerChanged = aim(drawerFocus, !sheetOpen && zone == Z_DRAWER ? drawerIndex : -1, snap);
+        boolean drawerChanged = aim(drawerFocus, (!sheetOpen || GRID_HOME) && zone == Z_DRAWER ? drawerIndex : -1, snap);
         boolean heroChanged = heroFocus.target != (!sheetOpen && zone == Z_HERO ? 1 : 0);
         heroFocus.target = !sheetOpen && zone == Z_HERO ? 1 : 0;
         if (snap) heroFocus.snap(heroFocus.target);
-        boolean topChanged = aim(topFocus, !sheetOpen && zone == Z_TOP ? topIndex : -1, snap);
+        boolean topChanged = aim(topFocus, (!sheetOpen || GRID_HOME) && zone == Z_TOP ? topIndex : -1, snap);
         heroChanged |= aim(cardFocus, !sheetOpen && zone == Z_CARDS ? cardIndex : -1, snap) | topChanged;
         statusChanged |= topChanged;
         tilesDirty |= snap || tilesChanged;
@@ -1880,7 +1902,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     private void retargetGrid(boolean snap) {
         for (int i = 0; i < gridFocus.length; i++) {
-            gridFocus[i].target = sheetOpen && i == gridIndex ? 1 : 0;
+            gridFocus[i].target = sheetOpen && i == gridIndex && !(GRID_HOME && zone != Z_SHELF) ? 1 : 0;
             if (snap) gridFocus[i].snap(gridFocus[i].target);
         }
         int rows = Math.max(1, (others.size() + COLUMNS - 1) / COLUMNS);
@@ -1895,7 +1917,15 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     private void drawSheet(Canvas c) {
-        if (CLEAN_LAYOUT) {
+        if (GRID_HOME) {
+            // The photo of the day, with the header (greeting, clock, Wi-Fi and buttons) over it and the grid below.
+            if (bing != null) drawBing(c, null);
+            else c.drawColor(0xFF0B0B0D);
+            applyTone();
+            flatPlain = false;
+            drawClock(c);
+            drawLightButtons(c);
+        } else if (CLEAN_LAYOUT) {
             // Black, with the header (greeting, clock, Wi-Fi and buttons) kept on top like CleanXiaomiTV.
             c.drawColor(0xFF000000);
             applyTone();
@@ -1919,7 +1949,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         float left = (1920 - gridWidth) / 2 * k;
         float gridTop = GRID_TOP * k;
         c.save();
-        c.clipRect(0, 233 * k, w, h);   // the rows scroll under the header
+        c.clipRect(0, (GRID_HOME ? 212 : 233) * k, w, h);   // the rows scroll under the header
         for (int i = 0; i < n; i++) {
             int r = i / COLUMNS, col = i % COLUMNS;
             float y = gridTop + r * GRID_ROW * k - shift;
@@ -1927,7 +1957,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             float x = left + col * (GRID_W + GRID_GAP) * k;
             gridCell.set(x, y, x + GRID_W * k, y + GRID_H * k);
             float f = gridFocus[i].value;
-            drawCard(c, others.get(i), gridCell, GRID_RADIUS * k, f, 0.08f);
+            drawCard(c, others.get(i), gridCell, GRID_RADIUS * k, f, gridCarry && i == gridIndex ? 0.16f : 0.08f);
             if (sheetOpen && i == gridIndex) focusedCell.set(cell);
             gridLabel.setColor(CLEAN_LAYOUT ? Ui.alpha(0xFFFFFFFF, Ui.clamp(f)) : blend(0x99FFFFFF, 0xFFFFFFFF, Ui.clamp(f)));
             c.drawText(gridLabels[i], gridCell.centerX(), gridCell.bottom + (40 + 6 * f) * k, gridLabel);
@@ -1949,6 +1979,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             shadows.draw(c, tmp, r, SHADOW_BLUR * k, shadow);
         }
         if (it.tile != null) roundImage(c, it.tile, it.tileShader, cell, r);
+        else if (it.logo != null) drawLogoCard(c, it, cell, r);
         if (f > 0.01f) {
             float bh = base.height();
             if (cardSheen == null || cardSheenH != bh) {
@@ -2074,14 +2105,14 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             final List<HomeApps.Item> s = apps ? HomeApps.shelf(c, true) : null;
             final List<HomeApps.Item> st = statusList(c);
             final List<HomeApps.Item> d = drawerList(c);
-            final List<HomeApps.Item> o = apps ? HomeApps.others(c) : null;
+            final List<HomeApps.Item> o = apps ? (GRID_HOME ? gridApps(c, s, HomeApps.others(c)) : HomeApps.others(c)) : null;
             final List<HomeApps.Item> top = apps ? HomeApps.topButtons() : null;   // they change with Prefs too
             handler.post(() -> {
                 if (top != null) setLightButtons(top);
                 if (s != null) setShelf(s);
                 setStatusItems(st);
                 setDrawerItems(d);
-                if (o != null && !sheetOpen) setOthers(o);
+                if (o != null && (!sheetOpen || (GRID_HOME && !gridCarry))) setOthers(o);
                 else if (o != null) appsStale = true;   // All Apps is open: its list comes next time
             });
         });
@@ -2106,6 +2137,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     boolean onKey(KeyEvent e) {
         wake();
         boolean down = e.getAction() == KeyEvent.ACTION_DOWN;
+        if (gridCarry) return gridCarryKey(e, down);
         if (reordering) return reorderKey(e, down);
         int code = e.getKeyCode();
         if (down && code != KeyEvent.KEYCODE_DPAD_CENTER && code != KeyEvent.KEYCODE_ENTER
@@ -2139,7 +2171,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                         okDown = true;
                         okHeld = false;
                         handler.removeCallbacks(holdStart);
-                        holdArmed = sheetOpen ? canToggleShelf(gridIndex) : canReorder();
+                        holdArmed = GRID_HOME ? canMoveGrid(gridIndex) : sheetOpen ? canToggleShelf(gridIndex) : canReorder();
                         if (holdArmed) handler.postDelayed(holdStart, HOLD_MS);
                     } else if (okDown && holdArmed && e.isLongPress()) {
                         hold();
@@ -2159,12 +2191,61 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                     backDown = false;
                 }
                 return true;
+            case KeyEvent.KEYCODE_SETTINGS:
+                if (down && e.getRepeatCount() == 0) openAndroidSettings();
+                return true;
             default:
+                if (down && e.getRepeatCount() == 0) android.util.Log.w("FreeMyTV", "key not used: " + KeyEvent.keyCodeToString(code));
                 return false;
         }
     }
 
+    /** The remote's Settings key: Android TV's own settings (the stock launcher normally answers it). */
+    private void openAndroidSettings() {
+        long now = SystemClock.uptimeMillis();
+        if (now - settingsKeyAt < 700) return;
+        settingsKeyAt = now;
+        try {
+            android.content.Intent i = new android.content.Intent(android.provider.Settings.ACTION_SETTINGS);
+            i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(i);
+        } catch (RuntimeException e) {
+            android.util.Log.w("FreeMyTV", "settings: " + e);
+            showToast(lang("Couldn't open Settings.", "N\u00e3o foi poss\u00edvel abrir as Configura\u00e7\u00f5es."));
+        }
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if (keyCode == KeyEvent.KEYCODE_SETTINGS) {
+            openAndroidSettings();
+            return true;
+        }
+        return super.onKeyDown(keyCode, event);
+    }
+
+    /** `en` or `pt`, by the home screen's language (Portuguese; anything else English). */
+    private String lang(String en, String pt) {
+        String l = Ui.language == null ? "" : Ui.language.toLowerCase(java.util.Locale.ROOT);
+        if (!l.startsWith("pt") && !l.startsWith("es") && !l.startsWith("en")) l = java.util.Locale.getDefault().getLanguage();
+        return l.startsWith("pt") ? pt : en;
+    }
+
     private void back() {
+        if (GRID_HOME) {
+            if (zone == Z_DRAWER || zone == WIDGETS) {
+                closeDrawer();
+            } else if (zone != Z_SHELF) {
+                zone = Z_SHELF;
+            } else {
+                return;
+            }
+            retarget(false);
+            retargetGrid(false);
+            gridDirty = true;
+            click.move();
+            return;
+        }
         if (sheetOpen) {
             closeSheet();
         } else if (zone == Z_DRAWER || zone == WIDGETS) {
@@ -2181,8 +2262,14 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     private void move(int dx, int dy) {
         if (sheetOpen) {
-            moveGrid(dx, dy);
-            return;
+            if (GRID_HOME && zone == Z_TOP) {
+                moveTopGrid(dx, dy);
+                return;
+            }
+            if (!(GRID_HOME && (zone == Z_DRAWER || zone == WIDGETS))) {
+                moveGrid(dx, dy);
+                return;
+            }
         }
         if (moveLight(dx, dy)) return;
         switch (zone) {
@@ -2277,8 +2364,34 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         return best;
     }
 
+    /** Up from the first row: the buttons at the top (Live TV, Inputs, Settings...). */
+    private void moveTopGrid(int dx, int dy) {
+        if (dy > 0) {
+            zone = Z_SHELF;
+        } else if (dx != 0) {
+            int next = Math.max(3, Math.min(2 + lightButtons.size(), topIndex + dx));
+            if (next == topIndex) return;
+            topIndex = next;
+        } else {
+            return;
+        }
+        retarget(false);
+        retargetGrid(false);
+        click.move();
+        gridDirty = true;
+    }
+
     private void moveGrid(int dx, int dy) {
         int n = others.size();
+        if (GRID_HOME && dy < 0 && dx == 0 && gridIndex / COLUMNS == 0 && !lightButtons.isEmpty()) {
+            zone = Z_TOP;
+            topIndex = 2 + lightButtons.size();
+            retarget(false);
+            retargetGrid(false);
+            click.move();
+            gridDirty = true;
+            return;
+        }
         if (n == 0) return;
         int r = gridIndex / COLUMNS, col = gridIndex % COLUMNS;
         int rows = (n + COLUMNS - 1) / COLUMNS;
@@ -2306,7 +2419,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         HomeApps.Item it;
         RectF r;
         if (!sheetOpen && zone == WIDGETS) return;   // a widget is only read
-        if (sheetOpen) {
+        if (sheetOpen && !(GRID_HOME && (zone == Z_TOP || zone == Z_DRAWER))) {
             if (others.isEmpty()) return;
             it = others.get(gridIndex);
             r = focusedCell;
@@ -2364,7 +2477,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     // MARK: - Holding OK: All Apps puts the app on the shelf or takes it off; on the shelf, the app is lifted to move
 
     private void hold() {
-        if (sheetOpen) toggleShelf(); else startReorder();
+        if (GRID_HOME) startGridCarry();
+        else if (sheetOpen) toggleShelf();
+        else startReorder();
     }
 
     /** TalkBack's long click on an app in All Apps (once per press, if the remote's hold also arrives). */
@@ -2375,7 +2490,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     private boolean canToggleShelf(int i) {
-        if (!sheetOpen || i >= others.size()) return false;
+        if (GRID_HOME || !sheetOpen || i >= others.size()) return false;
         HomeApps.Item it = others.get(i);
         return it.kind == HomeApps.APP && it.pkg != null;
     }
@@ -2922,6 +3037,160 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     // MARK: - Bing photo of the day
 
+    // MARK: - Grid home: every app in one list, in the order you made
+
+    /** Every app (the shelf's too) in one list: the saved order first, then A to Z; the Free My TV tile stays last. */
+    private static List<HomeApps.Item> gridApps(Context c, List<HomeApps.Item> shelfItems, List<HomeApps.Item> rest) {
+        List<HomeApps.Item> apps = new ArrayList<>(), specials = new ArrayList<>();
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        if (shelfItems != null) {
+            for (HomeApps.Item it : shelfItems) {
+                if (it.kind == HomeApps.APP && it.pkg != null && seen.add(it.pkg)) apps.add(it);
+            }
+        }
+        for (HomeApps.Item it : rest) {
+            if (it.kind == HomeApps.APP && it.pkg != null) {
+                if (seen.add(it.pkg)) apps.add(it);
+            } else {
+                specials.add(it);
+            }
+        }
+        final java.text.Collator collator = java.text.Collator.getInstance();
+        collator.setStrength(java.text.Collator.PRIMARY);
+        java.util.Collections.sort(apps, (a, b) -> collator.compare(a.label == null ? "" : a.label, b.label == null ? "" : b.label));
+        String saved = c.getSharedPreferences("fmt_grid", Context.MODE_PRIVATE).getString("order", "");
+        if (!saved.isEmpty()) {
+            final java.util.Map<String, Integer> pos = new HashMap<>();
+            String[] order = saved.split("\n");
+            for (int i = 0; i < order.length; i++) pos.put(order[i], i);
+            List<HomeApps.Item> first = new ArrayList<>(), others = new ArrayList<>();
+            for (HomeApps.Item it : apps) (pos.containsKey(it.pkg) ? first : others).add(it);
+            java.util.Collections.sort(first, (a, b) -> pos.get(a.pkg) - pos.get(b.pkg));
+            first.addAll(others);
+            apps = first;
+        }
+        apps.addAll(specials);
+        return apps;
+    }
+
+    private void saveGridOrder() {
+        StringBuilder order = new StringBuilder();
+        for (HomeApps.Item it : others) {
+            if (it.kind != HomeApps.APP || it.pkg == null) continue;
+            if (order.length() > 0) order.append('\n');
+            order.append(it.pkg);
+        }
+        getContext().getSharedPreferences("fmt_grid", Context.MODE_PRIVATE).edit().putString("order", order.toString()).apply();
+    }
+
+    private boolean canMoveGrid(int i) {
+        return GRID_HOME && sheetOpen && zone == Z_SHELF && !gridCarry && i >= 0 && i < others.size()
+                && others.get(i).kind == HomeApps.APP && others.get(i).pkg != null;
+    }
+
+    private void startGridCarry() {
+        handler.removeCallbacks(holdStart);
+        holdArmed = false;
+        if (!canMoveGrid(gridIndex)) return;
+        wake();
+        gridCarry = true;
+        okHeld = true;
+        gridCarryOrigin = new ArrayList<>(others);
+        gridCarryFrom = gridIndex;
+        click.open();
+        showToast(lang("Arrows to move \u00b7 OK to drop \u00b7 Back to cancel", "Setas para mover \u00b7 OK para soltar \u00b7 Voltar cancela"));
+        gridDirty = true;
+    }
+
+    /** Keys while an app is lifted: the arrows move it (it swaps places), OK drops it, Back puts everything back. */
+    private boolean gridCarryKey(KeyEvent e, boolean down) {
+        switch (e.getKeyCode()) {
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+                if (down) carryStep(-1);
+                return true;
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                if (down) carryStep(1);
+                return true;
+            case KeyEvent.KEYCODE_DPAD_UP:
+                if (down) carryStep(-COLUMNS);
+                return true;
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+                if (down) carryStep(COLUMNS);
+                return true;
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                // The press that lifted the app is still held: its repeats and release do nothing; a new press drops it.
+                if (down && e.getRepeatCount() == 0) {
+                    okDown = okHeld = false;
+                    dropGridCarry();
+                } else if (!down) {
+                    okDown = okHeld = false;
+                }
+                return true;
+            case KeyEvent.KEYCODE_BACK:
+                if (!down && !e.isCanceled()) cancelGridCarry(false);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private void carryStep(int delta) {
+        int j = gridIndex + delta;
+        if (j < 0 || j >= others.size()) return;
+        HomeApps.Item target = others.get(j);
+        if (target.kind != HomeApps.APP || target.pkg == null) return;   // the Free My TV tile stays last
+        java.util.Collections.swap(others, gridIndex, j);
+        Spring t = gridFocus[gridIndex];   // the focus goes along with the app: no pop
+        gridFocus[gridIndex] = gridFocus[j];
+        gridFocus[j] = t;
+        gridIndex = j;
+        gridLabels = null;
+        retargetGrid(false);
+        click.move();
+        gridDirty = true;
+    }
+
+    private void dropGridCarry() {
+        if (!gridCarry) return;
+        gridCarry = false;
+        saveGridOrder();
+        click.open();
+        showToast(lang("Order saved", "Ordem salva"));
+        gridDirty = true;
+    }
+
+    private void cancelGridCarry(boolean silent) {
+        if (!gridCarry) return;
+        gridCarry = false;
+        if (gridCarryOrigin != null) others = new ArrayList<>(gridCarryOrigin);
+        gridIndex = gridCarryFrom;
+        gridLabels = null;
+        retargetGrid(true);
+        gridDirty = true;
+        if (!silent) click.move();
+    }
+
+    /** An app that has a logo and no banner (the shelf's apps): a card in its brand colors with the logo in the middle. */
+    private void drawLogoCard(Canvas c, HomeApps.Item it, RectF box, float r) {
+        int[] style = TILE_STYLE.get(it.key);
+        int top = style != null ? style[0] : 0xFF1C1C1E, bottom = style != null ? style[1] : 0xFF0A0A0B;
+        tileFill.setShader(new LinearGradient(box.left, box.top, box.left, box.bottom, top, bottom, Shader.TileMode.CLAMP));
+        tileFill.setAlpha(255);
+        c.drawRoundRect(box, r, r, tileFill);
+        tileFill.setShader(null);
+        Bitmap logo = style != null && style[2] == 2 && it.logoDark != null ? it.logoDark : it.logo;
+        float lw = logo.getWidth(), lh = logo.getHeight();
+        float scale = (float) Math.sqrt(box.width() * box.height() * 0.085f / (lw * lh * Math.max(0.08f, it.logoInk))) * it.logoScale;
+        scale = Math.min(scale, Math.min(box.width() * 0.76f / lw, box.height() * 0.58f / lh));
+        float dw = lw * scale, dh = lh * scale;
+        tmp.set(box.centerX() - dw / 2, box.centerY() - dh / 2, box.centerX() + dw / 2, box.centerY() + dh / 2);
+        bitmapPaint.setColorFilter(style != null && style[2] == 1 ? whiteLogo : null);
+        c.drawBitmap(logo, null, tmp, bitmapPaint);
+        bitmapPaint.setColorFilter(null);
+    }
+
     /**
      * Flat glass like CleanXiaomiTV's dock and pills: the photo of the day, reduced, darkened and blurred, seen through
      * the shape; a dark green-black tint over it and a thin light edge. `lift` (0 to 1) brightens it for focus.
@@ -2985,12 +3254,16 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
     }
 
-    /** Downloads today's photo (once a day), keeps it in the app's files and prepares what the glass reads. */
+    /**
+     * Today's photo. The saved one is shown first (the screen has a photo as soon as the TV is on, even offline), then
+     * today's is downloaded (once a day) and replaces it.
+     */
     private void loadBing() {
         if (!BING_PHOTO || bingBusy || w <= 0 || h <= 0) return;
         long up = SystemClock.uptimeMillis();
         String today = new java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US).format(new java.util.Date());
-        if (today.equals(bingDay) || (bingTriedAt != 0 && up - bingTriedAt < 30 * 60_000L)) return;
+        long wait = bing == null ? 15_000L : 10 * 60_000L;   // no photo yet: try again soon
+        if (today.equals(bingDay) || (bingTriedAt != 0 && up - bingTriedAt < wait)) return;
         bingBusy = true;
         bingTriedAt = up;
         final int tw = Math.min(w, 1920), th = Math.round(h * (tw / (float) w));
@@ -2998,18 +3271,14 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         String lang = Ui.language == null ? "" : Ui.language.toLowerCase(java.util.Locale.ROOT);
         final String market = lang.startsWith("pt") ? "pt-BR" : lang.startsWith("es") ? "es-ES" : "en-US";
         LOADER.execute(() -> {
-            Bitmap shown = null;
-            int[] glass = null, frost = null;
-            Bitmap soft = null;
-            String credit = "", day = "";
             try {
                 java.io.File img = new java.io.File(dir, "bing-photo.jpg"), meta = new java.io.File(dir, "bing-photo.txt");
                 String saved = meta.exists() ? readText(meta) : "";
                 int nl = saved.indexOf('\n');
-                String savedDay = nl < 0 ? "" : saved.substring(0, nl);
-                credit = nl < 0 ? "" : saved.substring(nl + 1).trim();
-                day = img.exists() ? savedDay : "";
-                if (!today.equals(savedDay) || !img.exists()) {
+                String savedDay = nl < 0 ? "" : saved.substring(0, nl), savedCredit = nl < 0 ? "" : saved.substring(nl + 1).trim();
+                boolean have = img.exists();
+                if (have && bing == null) publishBing(img, tw, th, savedCredit, savedDay);
+                if (!today.equals(savedDay) || !have) {
                     try {
                         String json = new String(httpBytes("https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=1&mkt=" + market), "UTF-8");
                         JSONObject first = new JSONObject(json).getJSONArray("images").getJSONObject(0);
@@ -3020,52 +3289,58 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                             java.io.File part = new java.io.File(dir, "bing-photo.part");
                             writeBytes(part, bytes);
                             if (!part.renameTo(img)) throw new java.io.IOException("rename");
-                            credit = first.optString("copyright", "");
+                            String credit = first.optString("copyright", "");
                             writeBytes(meta, (today + "\n" + credit).getBytes("UTF-8"));
-                            day = today;
+                            publishBing(img, tw, th, credit, today);
                         }
                     } catch (Exception offline) {
-                        // Offline or Bing changed: the last photo, if there is one, stays.
+                        // Offline or Bing changed: the saved photo, if there is one, stays.
+                        android.util.Log.w("FreeMyTV", "bing download: " + offline);
                     }
                 }
-                if (img.exists()) {
-                    android.graphics.BitmapFactory.Options o = new android.graphics.BitmapFactory.Options();
-                    o.inJustDecodeBounds = true;
-                    android.graphics.BitmapFactory.decodeFile(img.getPath(), o);
-                    int sample = 1;
-                    while (o.outWidth / (sample * 2) >= tw && o.outHeight / (sample * 2) >= th) sample *= 2;
-                    o = new android.graphics.BitmapFactory.Options();
-                    o.inSampleSize = sample;
-                    Bitmap raw = android.graphics.BitmapFactory.decodeFile(img.getPath(), o);
-                    if (raw != null) {
-                        // Cover: the part of the photo with the screen's proportions, scaled to the screen.
-                        float want = tw / (float) th, have = raw.getWidth() / (float) raw.getHeight();
-                        Rect src = have > want
-                                ? new Rect((int) ((raw.getWidth() - raw.getHeight() * want) / 2), 0,
-                                        (int) ((raw.getWidth() + raw.getHeight() * want) / 2), raw.getHeight())
-                                : new Rect(0, (int) ((raw.getHeight() - raw.getWidth() / want) / 2), raw.getWidth(),
-                                        (int) ((raw.getHeight() + raw.getWidth() / want) / 2));
-                        shown = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888);
-                        new Canvas(shown).drawBitmap(raw, src, new Rect(0, 0, tw, th), new Paint(Paint.FILTER_BITMAP_FLAG));
-                        raw.recycle();
-                        glass = photoPixels(shown, Backdrop.GW, Backdrop.GH, 0.42f, 2);
-                        frost = photoPixels(shown, Backdrop.FW, Backdrop.FH, 0.30f, 3);
-                        soft = Bitmap.createBitmap(photoPixels(shown, 192, 108, 0.62f, 2), 192, 108, Bitmap.Config.ARGB_8888);
-                    }
-                }
-            } catch (Exception | OutOfMemoryError e) {
-                shown = null;
+            } catch (Exception | Error e) {
+                android.util.Log.w("FreeMyTV", "bing photo: " + e);
             }
-            final Bitmap fb = shown;
-            final int[] fg = glass, ff = frost;
-            final Bitmap fs = soft;
+            handler.post(() -> bingBusy = false);
+        });
+    }
+
+    /** Reads the photo file, prepares what the glass reads and puts it on screen (on the main thread). */
+    private void publishBing(java.io.File img, int tw, int th, String credit, String day) {
+        try {
+            android.graphics.BitmapFactory.Options o = new android.graphics.BitmapFactory.Options();
+            o.inJustDecodeBounds = true;
+            android.graphics.BitmapFactory.decodeFile(img.getPath(), o);
+            int sample = 1;
+            while (o.outWidth / (sample * 2) >= tw && o.outHeight / (sample * 2) >= th) sample *= 2;
+            o = new android.graphics.BitmapFactory.Options();
+            o.inSampleSize = sample;
+            Bitmap raw = android.graphics.BitmapFactory.decodeFile(img.getPath(), o);
+            if (raw == null) return;
+            // Cover: the part of the photo with the screen's proportions, scaled to the screen.
+            float want = tw / (float) th, have = raw.getWidth() / (float) raw.getHeight();
+            Rect src = have > want
+                    ? new Rect((int) ((raw.getWidth() - raw.getHeight() * want) / 2), 0,
+                            (int) ((raw.getWidth() + raw.getHeight() * want) / 2), raw.getHeight())
+                    : new Rect(0, (int) ((raw.getHeight() - raw.getWidth() / want) / 2), raw.getWidth(),
+                            (int) ((raw.getHeight() + raw.getWidth() / want) / 2));
+            Bitmap shown = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888);
+            new Canvas(shown).drawBitmap(raw, src, new Rect(0, 0, tw, th), new Paint(Paint.FILTER_BITMAP_FLAG));
+            raw.recycle();
+            final int[] glass = photoPixels(shown, Backdrop.GW, Backdrop.GH, 0.42f, 2);
+            final int[] frost = photoPixels(shown, Backdrop.FW, Backdrop.FH, 0.30f, 3);
+            Bitmap softBitmap = null;
+            try {
+                softBitmap = Bitmap.createBitmap(photoPixels(shown, 192, 108, 0.62f, 2), 192, 108, Bitmap.Config.ARGB_8888);
+            } catch (Exception | Error softFailed) {
+                android.util.Log.w("FreeMyTV", "bing soft glass: " + softFailed);
+            }
+            final Bitmap fb = shown, fs = softBitmap;
             final String fc = credit, fd = day;
             handler.post(() -> {
-                bingBusy = false;
-                if (fb == null || fg == null || ff == null) return;
                 bing = fb;
-                bingGlass = fg;
-                bingFrost = ff;
+                bingGlass = glass;
+                bingFrost = frost;
                 bingSoft = fs;
                 softShader = null;
                 bingCredit = fc;
@@ -3077,9 +3352,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 nightPair = false;
                 nightChanged();
                 heroDirty = true;
+                gridDirty = true;
                 wake();
             });
-        });
+        } catch (Exception | Error e) {
+            android.util.Log.w("FreeMyTV", "bing photo: " + e);
+        }
     }
 
     /** `photo` reduced to wd x ht, darkened to `keep` of its light and blurred: what the glass sees through. */
@@ -3204,7 +3482,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         float right = first.left - 18 * k, cy = first.centerY();
         cell.set(right - pw, cy - ph / 2, right, cy + ph / 2);
         float rad = ph / 2;
-        if (bingSoft != null) {
+        if (CLEAN_LAYOUT) {
             flatGlass(c, cell, rad, 0);
         } else {
         tmp.set(cell);
@@ -3396,7 +3674,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             RectF r = topRects[3 + i];
             float f = Ui.clamp(topFocus[3 + i].value), s = 1 + 0.1f * f, rad = r.width() / 2 * s;
             cell.set(r.centerX() - rad, r.centerY() - rad, r.centerX() + rad, r.centerY() + rad);
-            if (bingSoft != null) {
+            if (CLEAN_LAYOUT) {
                 flatGlass(c, cell, rad, 0);
             } else {
             tmp.set(cell);
